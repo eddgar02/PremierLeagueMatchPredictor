@@ -19,8 +19,6 @@ matches["team"].value_counts()
 # Some teams have gotten promoted or relegated over the years but we are only intereseted in the teams
 # in current 2024-2025 season
 
-matches["round"].value_counts()
-
 # Change date type to time
 matches["date"] = pd.to_datetime(matches["date"])
 
@@ -36,36 +34,59 @@ matches["day_cat"]= matches["date"].dt.dayofweek
 matches["target"] = (matches["result"] == "W").astype("int")
 
 from sklearn.ensemble import HistGradientBoostingClassifier
+from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
+from sklearn.metrics import accuracy_score, precision_score
 
 # Initializing random forest tree model
 hg= HistGradientBoostingClassifier()
 
-#Training with all matches before the year 2024
+param_grid = {
+    'learning_rate': [0.01, 0.05, 0.1, 0.2, 0.3],
+    'max_iter': [100, 200, 500, 1000],
+    'max_depth': [3, 5, 7, 9, 12],
+    'min_samples_leaf': [1, 2, 5],
+    'l2_regularization': [0.0, 0.1, 1.0]
+}
+
+tscv = TimeSeriesSplit(n_splits=5)
+
+# GridSearchCV with F1 score
+grid_search = GridSearchCV(
+    estimator=hg,
+    param_grid=param_grid,
+    cv=tscv,
+    scoring='f1',
+    n_jobs=-1,
+    verbose=1
+)
+
+#training with all matches before the year 2024
 train = matches[matches["date"] < '2024-01-01']
 
 test = matches[matches["date"] > '2024-01-01']
 
 predictors = ["venue_cat", "opp_cat", "hour", "day_cat","sh","pk","sot","xg","xga"]
 
-hg.fit(train[predictors], train["target"])
+#fit GridSearchCV on the training data
+grid_search.fit(train[predictors], train["target"])
 
-preds = hg.predict(test[predictors])
+print("Best Parameters:", grid_search.best_params_)
 
-from sklearn.metrics import accuracy_score
+#train the best model on the entire training set
+best_model = grid_search.best_estimator_
 
-acc = accuracy_score(test["target"], preds)
+# Make predictions on the test set
+preds = best_model.predict(test[predictors])
 
-acc
+#model evalutation:
+accuracy = accuracy_score(test["target"], preds)
+precision = precision_score(test["target"], preds)
 
-#create a dataframe
-combined = pd.DataFrame(dict(actual=test["target"], predicted=preds))
+print("Test Accuracy:", accuracy)
+print("Test Precision:", precision)
 
-pd.crosstab(index=combined["actual"], columns=combined["predicted"])
-#
-
-from sklearn.metrics import precision_score
-
-precision_score(test["target"], preds)
+#Now creating a new model but with the inlclusion of rolling averages to check the previous form from the past five matches and
+# factoring that into the model prediction
 
 #Create one dataframe for each team
 grouped_matches = matches.groupby("team")
@@ -82,23 +103,28 @@ def rolling_averages(group, cols, new_cols):
 cols = ["gf", "sh", "sot", "pk",]
 new_cols = [f"{c}_rolling" for c in cols]
 
+#applying rolling averages to dataframe and adding new column
 matches_rolling = matches.groupby("team").apply(lambda x: rolling_averages(x, cols, new_cols))
-
-matches_rolling
 
 matches_rolling = matches_rolling.droplevel('team')
 
 #add new indices for the rows
 matches_rolling.index = range(matches_rolling.shape[0])
 
+matches_rolling
+
 def make_predictions(data,predictors):
   train = data[data["date"] < '2024-01-01']
   test = data[data["date"] > '2024-01-01']
-  hg.fit(train[predictors], train["target"])
-  preds = hg.predict(test[predictors])
-  combined = pd.DataFrame(dict(actual=test["target"], predicted=preds), index=test.index)
-  precision = precision_score(test["target"], preds)
+
+  #train the best model on the entire training set
+  best_model = grid_search.best_estimator_
+  #Make predictions on the test set
+  preds = best_model.predict(test[predictors])
+  #model evalutation:
   accuracy = accuracy_score(test["target"], preds)
+  precision = precision_score(test["target"], preds)
+
   return combined, precision, accuracy
 
 combined, precision , accuracy = make_predictions(matches_rolling, predictors + new_cols)
@@ -107,27 +133,35 @@ precision
 
 accuracy
 
-combined
+#Fixing team name consistency
+# Update map_values to include additional team name variations
+map_values = {
+    "Sheffield United": "Sheffield Utd",
+    "Queens Park Rangers": "QPR",
+    "Newcastle United": "Newcastle Utd",
+    "West Bromwich Albion": "West Brom",
+    "Brighton and Hove Albion": "Brighton",
+    "Manchester United": "Manchester Utd",
+    "Tottenham Hotspur": "Tottenham",
+    "West Ham United": "West Ham",
+    "Wolverhampton Wanderers": "Wolves",
+    "Nottingham Forest": "Nott' Forest",  # Add Nottingham Forest correction
+    # Add more mappings if necessary
+}
 
-combined = combined.merge(matches_rolling[["date", "team", "opponent", "result"]], left_index=True, right_index=True)
-
-combined
-
+#define MissingDict class to handle missing keys
 class MissingDict(dict):
     __missing__ = lambda self, key: key
 
-map_values = {"Sheffield United":"Sheffield Utd","Queens Park Rangers":"QPR","Newcastle United": "Newcastle Utd","West Bromwich Albion": "West Brom","Brighton and Hove Albion": "Brighton", "Manchester United": "Manchester Utd", "Newcastle United": "Newcastle Utd", "Tottenham Hotspur": "Tottenham", "West Ham United": "West Ham", "Wolverhampton Wanderers": "Wolves"}
 mapping = MissingDict(**map_values)
 
-mapping["West Ham United"]
+#appply the mapping to correct team names in your DataFrame
+matches_rolling['team'] = matches_rolling['team'].map(mapping)
+matches_rolling['opponent'] = matches_rolling['opponent'].map(mapping)
 
-combined["new_team"] = combined["team"].map(mapping)
+combined, precision , accuracy = make_predictions(matches_rolling, predictors + new_cols)
 
-merged = combined.merge(combined, left_on=["date", "new_team"], right_on=["date", "opponent"])
+accuracy
 
-merged
+precision
 
-merged[(merged["predicted_x"] == 1) & (merged["predicted_y"] ==0)]["actual_x"].value_counts()
-
-# from looking at the matches in which the algorithm predicted on both sides
-# and got .787 precision
